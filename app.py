@@ -1,7 +1,20 @@
 
 import os
+import sqlite3
+import subprocess
+import sys
+
 import streamlit as st
+
+# Create database automatically if it does not exist
+if not os.path.exists("data/sales.db"):
+    subprocess.run(
+        [sys.executable, "database/create_database.py"],
+        check=True
+    )
+
 from graph.multi_agent_workflow import app as agent_workflow
+
 
 st.set_page_config(
     page_title="AI Data Analyst Agent",
