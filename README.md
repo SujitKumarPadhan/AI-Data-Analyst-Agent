@@ -290,3 +290,7 @@ B.Tech Computer Science and Engineering
 ---
 
 ⭐ If you find this project interesting, consider giving it a star on GitHub.
+
+## Application Screenshot
+
+![AI Data Analyst Agent](assets/screenshots/streamlit_home.png)
