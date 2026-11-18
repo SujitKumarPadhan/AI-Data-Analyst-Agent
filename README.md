@@ -293,4 +293,4 @@ B.Tech Computer Science and Engineering
 
 ## Application Screenshot
 
-![AI Data Analyst Agent](assets/screenshots/streamlit_home.png)
+![AI Data Analyst Agent](assets/screenshots/image.png)
