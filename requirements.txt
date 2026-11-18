@@ -10,3 +10,4 @@ plotly
 streamlit
 python-dotenv
 sqlalchemy
+langchain-groq
