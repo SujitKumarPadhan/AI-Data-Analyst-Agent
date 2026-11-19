@@ -8,6 +8,7 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+**/__pycache__/**
 
 # Jupyter
 .ipynb_checkpoints/
@@ -22,10 +23,11 @@ Thumbs.db
 # Streamlit
 .streamlit/secrets.toml
 
+# Generated Uploads and Databases
+data/uploads/
+data/*.db
+data/**/*.db
+
 # Generated Outputs
-
-# Generated Database
-data/sales.db
-
-# Python Cache
-**/__pycache__/**
+outputs/charts/
+outputs/reports/

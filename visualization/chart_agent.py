@@ -1,19 +1,13 @@
 
 import os
 import sqlite3
-
 import matplotlib.pyplot as plt
 
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import Literal
-
 from langchain_groq import ChatGroq
 
-load_dotenv()
 
-
-# 1. Define chart response structure
 class ChartRequest(BaseModel):
 
     sql_query: str = Field(
@@ -27,7 +21,6 @@ class ChartRequest(BaseModel):
     chart_title: str
 
 
-# 2. Initialize Groq
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0
@@ -39,8 +32,7 @@ chart_llm = llm.with_structured_output(
 )
 
 
-# 3. Execute SQL query safely
-def execute_sql(query):
+def execute_sql(query, db_path):
 
     query = query.strip().rstrip(";").strip()
 
@@ -51,11 +43,12 @@ def execute_sql(query):
         raise ValueError("Multiple SQL statements are not allowed!")
 
     connection = sqlite3.connect(
-        "file:data/sales.db?mode=ro",
+        f"file:{db_path}?mode=ro",
         uri=True
     )
 
     try:
+
         connection.execute("PRAGMA query_only = ON")
 
         cursor = connection.cursor()
@@ -74,12 +67,15 @@ def execute_sql(query):
         connection.close()
 
 
-# 4. Generate chart
-def generate_chart(chart_request, columns, results):
+def generate_chart(
+    chart_request,
+    columns,
+    results,
+    chart_path
+):
 
     if not results:
-        print("\nNo data available for visualization.")
-        return
+        raise ValueError("No data available for visualization.")
 
     if chart_request.x_column not in columns:
         raise ValueError("X column not found in SQL results!")
@@ -103,12 +99,7 @@ def generate_chart(chart_request, columns, results):
 
     elif chart_request.chart_type == "line":
 
-        plt.plot(
-            x_values,
-            y_values,
-            marker="o"
-        )
-
+        plt.plot(x_values, y_values, marker="o")
         plt.xlabel(chart_request.x_column)
         plt.ylabel(chart_request.y_column)
 
@@ -127,116 +118,77 @@ def generate_chart(chart_request, columns, results):
 
     plt.tight_layout()
 
-    os.makedirs("outputs/charts", exist_ok=True)
-
-    chart_path = "outputs/charts/business_chart.png"
+    os.makedirs(
+        os.path.dirname(chart_path),
+        exist_ok=True
+    )
 
     plt.savefig(chart_path, dpi=150)
-
-    print("\nChart saved successfully:", chart_path)
-
-    plt.show()
 
     plt.close()
 
 
-# 5. Reusable Visualization Agent Function
+def run_visualization_agent(
+    user_question,
+    db_path,
+    columns
+):
 
-def run_visualization_agent(user_question):
+    column_details = ", ".join(columns)
 
-    # Generate SQL and chart details
     response = chart_llm.invoke(
         f"""
-        You are a Business Data Visualization Agent.
+        You are a Data Visualization Agent.
 
-        User Question: {user_question}
+        User Question:
+        {user_question}
 
-        Database Table: sales
+        Database Table:
+        dataset
 
         Available Columns:
-        Order_ID, Date, Product, Category,
-        Region, Quantity, Price, Profit
-
-        Revenue = Quantity * Price
+        {column_details}
 
         Instructions:
 
         1. Generate a valid SQLite SELECT query.
-        2. Select only the columns needed for the chart.
-        3. Choose the most suitable chart type:
-           - bar: Compare categories or products.
-           - line: Show monthly or time-based trends.
-           - pie: Show percentage contribution.
-        4. x_column must match a SQL result column.
-        5. y_column must match a numeric SQL result column.
-        6. Provide a meaningful chart title.
-        7. Never generate INSERT, UPDATE, DELETE or DROP queries.
-
-        Return the response in JSON format.
-        The JSON must contain these fields:
-        sql_query, chart_type, x_column, y_column, chart_title.
+        2. Use only available columns.
+        3. Use table name dataset.
+        4. Choose bar, line, or pie chart.
+        5. x_column must exist in query results.
+        6. y_column must be numeric.
+        7. Never generate modification queries.
+        8. Return JSON with:
+           sql_query, chart_type, x_column,
+           y_column, chart_title.
         """
     )
 
-    print("\nGenerated SQL:")
-    print(response.sql_query)
-
-    print("\nSelected Chart Type:")
-    print(response.chart_type)
-
-    # Fetch database results
-    columns, results = execute_sql(
-        response.sql_query
+    columns_result, results = execute_sql(
+        response.sql_query,
+        db_path
     )
 
-    print("\nSQL Query Results:")
+    # Create a separate chart folder for each session
+    session_folder = os.path.dirname(
+        os.path.abspath(db_path)
+    )
 
-    for row in results:
-        print(row)
+    chart_path = os.path.join(
+        session_folder,
+        "charts",
+        "business_chart.png"
+    )
 
-    # Generate visualization
     generate_chart(
         response,
-        columns,
-        results
+        columns_result,
+        results,
+        chart_path
     )
 
     return (
         f"Chart generated successfully. "
         f"Chart Type: {response.chart_type}. "
-        f"Chart Path: outputs/charts/business_chart.png"
+        f"Chart Path: {chart_path}"
     )
-
-
-# 6. Interactive Data Visualization Agent
-
-if __name__ == "__main__":
-
-    print("\nAI Data Visualization Agent is Ready!")
-    print("Ask questions to generate business charts.")
-    print("Type 'exit' to stop.\n")
-
-    while True:
-
-        user_question = input(
-            "Ask your business question (or type 'exit'): "
-        )
-
-        if user_question.lower().strip() == "exit":
-
-            print("\nVisualization Agent Stopped!")
-            break
-
-        try:
-
-            result = run_visualization_agent(
-                user_question
-            )
-
-            print("\n", result)
-
-        except Exception as e:
-
-            print("\nError:", str(e))
-
-        print("\n" + "-" * 50)

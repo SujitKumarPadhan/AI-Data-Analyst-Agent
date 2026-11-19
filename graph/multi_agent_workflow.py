@@ -1,45 +1,54 @@
 
 import os
 import sys
+from typing import TypedDict, Optional, Any, Literal
 
-# Add project root to Python path
+from dotenv import load_dotenv
+
+# 1. Project path
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
 
 sys.path.insert(0, PROJECT_ROOT)
 
-from typing import TypedDict, Optional, Literal
+# 2. Load environment variables
+load_dotenv(
+    dotenv_path=os.path.join(PROJECT_ROOT, ".env")
+)
 
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+# 3. Check Groq API key
+if not os.getenv("GROQ_API_KEY"):
+    raise ValueError(
+        "GROQ_API_KEY not found. Please check your .env file."
+    )
 
+# 4. Import required libraries
+from pydantic import BaseModel
 from langchain_groq import ChatGroq
-
 from langgraph.graph import StateGraph, START, END
 
-from tools.eda_tool import eda_tools
+# 5. Import dynamic agents
+from tools.dynamic_eda_tool import create_dynamic_eda_tools
 from database.sql_agent import run_sql_agent
 from visualization.chart_agent import run_visualization_agent
 from reports.business_report_agent import run_report_agent
 
 
-load_dotenv()
-
-
-# 1. Define shared workflow state
+# 6. Define workflow state
 class AgentState(TypedDict):
 
     user_question: str
+    dataframe: Any
+    db_path: str
+    columns: list
 
     selected_agent: Optional[str]
-
     agent_result: Optional[str]
-
     final_response: Optional[str]
 
 
-# 2. Define router response
+# 7. Router response structure
 class RouterResponse(BaseModel):
 
     selected_agent: Literal[
@@ -47,20 +56,16 @@ class RouterResponse(BaseModel):
         "sql",
         "visualization",
         "report"
-    ] = Field(
-        description="Select the most suitable agent"
-    )
+    ]
 
 
-# 3. Define EDA planner response
+# 8. EDA tool selection structure
 class ToolSelection(BaseModel):
 
-    tools: list[str] = Field(
-        description="List of all required EDA tool names"
-    )
+    tools: list[str]
 
 
-# 4. Initialize Groq LLM
+# 9. Initialize Groq
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0
@@ -76,20 +81,8 @@ planner_llm = llm.with_structured_output(
 )
 
 
-# 5. Prepare EDA tools
-tool_map = {
-    tool.name: tool
-    for tool in eda_tools
-}
-
-available_tools = "\n".join(
-    f"- {tool.name}: {tool.description}"
-    for tool in eda_tools
-)
-
-
-# 6. Create AI Agent Router
-def agent_router(state: AgentState):
+# 10. Agent Router
+def agent_router(state):
 
     question = state["user_question"]
 
@@ -97,42 +90,55 @@ def agent_router(state: AgentState):
         f"""
         You are an AI Data Analyst Agent Router.
 
-        Select the most suitable agent.
+        Select exactly one agent for the user's question.
 
         Available Agents:
 
-        eda: Data analysis, statistics and insights.
+        1. eda:
+           Dataset overview, missing values,
+           statistics, correlation and categorical analysis.
 
-        sql: SQL queries and database calculations.
+        2. sql:
+           Database queries, filtering, grouping,
+           sorting and calculations.
 
-        visualization: Bar, line and pie charts.
+        3. visualization:
+           Generate bar, line or pie charts.
 
-        report: Business reports and summaries.
+        4. report:
+           Generate complete data analysis reports.
 
         User Question:
         {question}
 
-        Select exactly one agent.
+        Return the correct agent.
         """
     )
 
-    selected_agent = response.selected_agent
-
-    print("\nSelected Agent:", selected_agent.upper())
-
     return {
-        "selected_agent": selected_agent
+        "selected_agent": response.selected_agent
     }
 
 
-# 7. EDA Agent Node
-def eda_node(state: AgentState):
-
-    print("\nEDA Agent Executing...")
+# 11. Dynamic EDA Agent
+def eda_node(state):
 
     question = state["user_question"]
+    df = state["dataframe"]
 
-    # Select all required tools
+    dynamic_tools = create_dynamic_eda_tools(df)
+
+    tool_map = {
+        selected_tool.name: selected_tool
+        for selected_tool in dynamic_tools
+    }
+
+    available_tools = "\n".join(
+        f"- {selected_tool.name}: {selected_tool.description}"
+        for selected_tool in dynamic_tools
+    )
+
+    # Select EDA tools using JSON output
     response = planner_llm.invoke(
         f"""
         You are an expert Data Analysis Planner.
@@ -143,90 +149,88 @@ def eda_node(state: AgentState):
         Available EDA Tools:
         {available_tools}
 
-        Instructions:
-        1. Select all tools required to answer the question.
-        2. Select exact tool names from the available tools.
-        3. Do not select unnecessary tools.
-        4. If multiple metrics are requested, select all relevant tools.
-        5. Return an empty list if no tool is required.
+        Select only the tools required to answer
+        the user's question.
 
-        Return the response in JSON format.
-        The JSON must contain one field named "tools".
-        The "tools" field must contain a list of exact tool names.
+        Return a valid JSON object with a field named "tools".
+
+        The tools field must contain a list of exact tool names.
+        Do not select unavailable tools.
+
+        Example JSON:
+        {{"tools": ["get_dataset_overview", "get_missing_values"]}}
         """
     )
 
     selected_tools = response.tools
 
-    print("\nAI Planner Selected Tools:")
-
-    for tool_name in selected_tools:
-        print("-", tool_name)
-
-    tool_results = []
-
     # Execute selected tools
+    results = []
+
     for tool_name in selected_tools:
 
         if tool_name not in tool_map:
-            print("\nUnknown Tool:", tool_name)
             continue
 
         selected_tool = tool_map[tool_name]
 
-        result = selected_tool.invoke({})
+        if tool_name == "get_top_values":
 
-        tool_results.append(
+            column_name = next(
+                (
+                    column
+                    for column in df.columns
+                    if column.lower() in question.lower()
+                ),
+                None
+            )
+
+            if column_name is None:
+                continue
+
+            result = selected_tool.invoke({
+                "column_name": column_name
+            })
+
+        else:
+
+            result = selected_tool.invoke({})
+
+        results.append(
             f"{tool_name}: {result}"
         )
 
-        print("\nTool Selected:", tool_name)
-        print("Tool Result:", result)
-
-    if tool_results:
-
-        agent_result = "\n".join(tool_results)
-
-    else:
-
-        agent_result = "No relevant EDA tools were selected."
-
     return {
-        "agent_result": agent_result
+        "agent_result": "\n".join(results)
+        if results
+        else "No suitable EDA tools were selected."
     }
 
 
-# 8. SQL Agent Node
-def sql_node(state: AgentState):
-
-    print("\nSQL Agent Executing...")
+# 12. Dynamic SQL Agent
+def sql_node(state):
 
     columns, results = run_sql_agent(
-        state["user_question"]
-    )
-
-    print("\nSQL Query Results:")
-
-    for row in results:
-        print(row)
-
-    agent_result = (
-        f"Columns: {columns}\n"
-        f"Results: {results}"
+        state["user_question"],
+        state["db_path"],
+        state["columns"]
     )
 
     return {
-        "agent_result": agent_result
+        "agent_result": (
+            f"Columns: {columns}\n"
+            f"Results: {results}"
+        )
     }
 
 
-# 9. Visualization Agent Node
-def visualization_node(state: AgentState):
-
-    print("\nVisualization Agent Executing...")
+# 13. Dynamic Visualization Agent
+def visualization_node(state):
 
     result = run_visualization_agent(
-        state["user_question"]
+        state["user_question"],
+        state["db_path"],
+        state["columns"]
     )
 
     return {
@@ -234,28 +238,39 @@ def visualization_node(state: AgentState):
     }
 
 
-# 10. Report Agent Node
-def report_node(state: AgentState):
-
-    print("\nReport Agent Executing...")
+# 14. Dynamic Report Agent
+def report_node(state):
 
     result = run_report_agent(
-        state["user_question"]
+        state["user_question"],
+        state["dataframe"]
     )
+
+    os.makedirs(
+        "outputs/reports",
+        exist_ok=True
+    )
+
+    with open(
+        "outputs/reports/business_report.md",
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        file.write(result)
 
     return {
         "agent_result": result
     }
 
 
-# 11. Final Response Node
-def final_response_node(state: AgentState):
 
-    print("\nGenerating Final Response...")
+# 15. Final Response
+def final_response_node(state):
 
     response = llm.invoke(
         f"""
-        You are a professional AI Data Analyst Assistant.
+        You are a professional AI Data Analyst.
 
         User Question:
         {state["user_question"]}
@@ -263,35 +278,68 @@ def final_response_node(state: AgentState):
         Selected Agent:
         {state["selected_agent"]}
 
-        Agent Result:
+        Actual Analysis Results:
         {state["agent_result"]}
 
-        Instructions:
-        1. Give a clear and simple answer.
-        2. Use actual information from the agent result.
-        3. Do not invent numbers or facts.
-        4. Use bullet points wherever useful.
-        5. Keep the response professional.
-        6. All monetary values must use INR (₹), never USD ($).
-        7. Do not change the numerical values.
+        STRICT DATA ACCURACY RULES:
+
+        1. Use only information supported by actual analysis results.
+
+        2. Never invent, assume, or modify numerical values.
+
+        3. Never assume currency.
+           If the dataset does not specify currency,
+           use the column name Monthly_Salary without
+           mentioning USD, INR, dollars, or rupees.
+
+        4. Never assume the meaning of a categorical value.
+           For example, Attrition = Yes must be described
+           as "Attrition = Yes records".
+           Never automatically interpret it as employees
+           who left the company.
+
+        5. Never describe attrition as low, high, moderate,
+           or healthy without a verified external benchmark.
+
+        6. Do not invent industry standards or benchmarks.
+
+        7. Do not claim causation or correlation
+           unless the analysis explicitly supports it.
+
+        8. Do not claim that job satisfaction affects
+           attrition or that performance causes attrition.
+
+        9. Clearly distinguish actual observations
+           from recommendations.
+
+        10. If information is unavailable,
+            explicitly mention that it is unavailable.
+
+        11. Do not create conclusions from assumptions.
+
+        12. Keep the response clear and professional.
+
+        RESPONSE FORMAT:
+
+        - Use simple professional English.
+        - Use Markdown headings and bullet points.
+        - Present numerical findings accurately.
+        - Explain important observations.
+        - Give practical recommendations only
+          when supported by the available data.
+
+        Your priority is factual accuracy, not making
+        the report sound impressive.
         """
     )
 
-    final_response = response.text
-
-    print("\nFinal Answer:")
-    print(final_response)
-
     return {
-        "final_response": final_response
+        "final_response": response.content
     }
 
-
-# 12. Build LangGraph Workflow
+# 16. Build LangGraph Workflow
 workflow = StateGraph(AgentState)
 
-
-# Add nodes
 workflow.add_node("router", agent_router)
 workflow.add_node("eda", eda_node)
 workflow.add_node("sql", sql_node)
@@ -300,11 +348,9 @@ workflow.add_node("report", report_node)
 workflow.add_node("final_response", final_response_node)
 
 
-# Connect START to router
+# 17. Workflow connections
 workflow.add_edge(START, "router")
 
-
-# Conditional routing
 workflow.add_conditional_edges(
     "router",
     lambda state: state["selected_agent"],
@@ -316,36 +362,18 @@ workflow.add_conditional_edges(
     }
 )
 
-
-# Connect all agents to Final Response Node
 workflow.add_edge("eda", "final_response")
 workflow.add_edge("sql", "final_response")
 workflow.add_edge("visualization", "final_response")
 workflow.add_edge("report", "final_response")
 
-
-# Connect Final Response Node to END
 workflow.add_edge("final_response", END)
 
 
-# 13. Compile Workflow
+# 18. Compile workflow
 app = workflow.compile()
 
 
-# 14. Test Workflow
 if __name__ == "__main__":
 
-    initial_state = {
-        "user_question": "What is the total revenue and total profit using SQL?",
-        "selected_agent": None,
-        "agent_result": None,
-        "final_response": None
-    }
-
-    result = app.invoke(initial_state)
-
-    print("\nFinal Workflow Result:")
-    print(result)
-
-    print("\nFinal AI Response:")
-    print(result["final_response"])
+    print("Dynamic AI Data Analyst Workflow is ready!")

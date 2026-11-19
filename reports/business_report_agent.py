@@ -1,146 +1,356 @@
 
-import os
 import json
 import pandas as pd
-
-from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 
-load_dotenv()
 
-
-# 1. Initialize Groq
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0
 )
 
 
-# 2. Reusable Report Agent Function
-def run_report_agent(user_question=None):
+def run_report_agent(user_question, df):
 
-    print("\nGenerating Business Report...")
+    print("\nGenerating Data Analysis Report...")
 
-    # Load sales dataset
-    df = pd.read_csv("data/raw/sales_data.csv")
+    dataset = df.copy()
 
-    df["Revenue"] = df["Quantity"] * df["Price"]
-
-    # Calculate business metrics
-    total_revenue = int(df["Revenue"].sum())
-    total_profit = int(df["Profit"].sum())
-    total_quantity = int(df["Quantity"].sum())
-    total_orders = int(df["Order_ID"].nunique())
-
-    profit_margin = round(
-        (total_profit / total_revenue) * 100, 2
-    )
-
-    # Product performance
-    product_performance = (
-        df.groupby("Product")
-        .agg(
-            Quantity=("Quantity", "sum"),
-            Revenue=("Revenue", "sum"),
-            Profit=("Profit", "sum")
-        )
-        .reset_index()
-    )
-
-    best_product = product_performance.loc[
-        product_performance["Revenue"].idxmax(),
-        "Product"
-    ]
-
-    # Region performance
-    region_performance = (
-        df.groupby("Region")["Revenue"]
-        .sum()
-        .to_dict()
-    )
-
-    best_region = max(
-        region_performance,
-        key=region_performance.get
-    )
-
-    # Monthly performance
-    df["Date"] = pd.to_datetime(df["Date"])
-
-    df["Month"] = df["Date"].dt.strftime("%Y-%m")
-
-    monthly_performance = (
-        df.groupby("Month")
-        .agg(
-            Revenue=("Revenue", "sum"),
-            Profit=("Profit", "sum")
-        )
-        .reset_index()
-    )
-
-    monthly_data = monthly_performance.to_dict(
-        orient="records"
-    )
-
-    # Prepare business data
-    business_data = {
-        "total_revenue": total_revenue,
-        "total_profit": total_profit,
-        "total_quantity": total_quantity,
-        "total_orders": total_orders,
-        "profit_margin": profit_margin,
-        "best_product": best_product,
-        "best_region": best_region,
-        "region_performance": region_performance,
-        "product_performance": product_performance.to_dict(
-            orient="records"
-        ),
-        "monthly_performance": monthly_data
+    # 1. Dataset Overview
+    overview = {
+        "total_rows": len(dataset),
+        "total_columns": len(dataset.columns),
+        "column_names": dataset.columns.tolist(),
+        "data_types": {
+            column: str(dtype)
+            for column, dtype in dataset.dtypes.items()
+        },
+        "duplicate_rows": int(dataset.duplicated().sum())
     }
 
-    # Generate business report
+    # 2. Missing Values
+    missing_values = {
+        column: int(value)
+        for column, value in dataset.isnull().sum().items()
+    }
+
+    # 3. Numerical Analysis
+    numeric_df = dataset.select_dtypes(include="number")
+
+    numeric_summary = (
+        numeric_df.describe()
+        .round(2)
+        .to_dict()
+        if not numeric_df.empty else {}
+    )
+
+    # 4. Categorical Analysis
+    categorical_df = dataset.select_dtypes(
+        include=["object", "category", "bool"]
+    )
+
+    categorical_summary = {}
+
+    for column in categorical_df.columns:
+
+        categorical_summary[column] = {
+            "unique_values": int(
+                categorical_df[column].nunique()
+            ),
+            "top_values": {
+                str(key): int(value)
+                for key, value in (
+                    categorical_df[column]
+                    .value_counts()
+                    .head(10)
+                    .items()
+                )
+            }
+        }
+
+    # 5. Department-wise Salary Analysis
+    department_analysis = {}
+
+    if (
+        "Department" in dataset.columns
+        and "Monthly_Salary" in dataset.columns
+        and pd.api.types.is_numeric_dtype(
+            dataset["Monthly_Salary"]
+        )
+    ):
+
+        salary_analysis = (
+            dataset.groupby("Department")["Monthly_Salary"]
+            .agg(["count", "mean", "min", "max"])
+            .assign(
+                salary_range=lambda x: x["max"] - x["min"]
+            )
+            .round(2)
+            .sort_values("mean", ascending=False)
+        )
+
+        salary_ranking = {
+            str(key): float(value)
+            for key, value in (
+                salary_analysis["mean"].items()
+            )
+        }
+
+        overall_average = round(
+            float(dataset["Monthly_Salary"].mean()), 2
+        )
+
+        salary_insights = {}
+
+        if not salary_analysis.empty:
+
+            highest_department = salary_analysis["mean"].idxmax()
+            lowest_department = salary_analysis["mean"].idxmin()
+
+            highest_salary = float(
+                salary_analysis.loc[highest_department, "mean"]
+            )
+
+            lowest_salary = float(
+                salary_analysis.loc[lowest_department, "mean"]
+            )
+
+            highest_department_min = float(
+                salary_analysis.loc[highest_department, "min"]
+            )
+
+            highest_department_max = float(
+                salary_analysis.loc[highest_department, "max"]
+            )
+
+            salary_insights = {
+                "overall_average_salary": overall_average,
+
+                "highest_average_salary_department": str(
+                    highest_department
+                ),
+
+                "highest_average_salary": round(
+                    highest_salary, 2
+                ),
+
+                "lowest_average_salary_department": str(
+                    lowest_department
+                ),
+
+                "lowest_average_salary": round(
+                    lowest_salary, 2
+                ),
+
+                "difference_between_highest_and_lowest_department_averages": round(
+                    highest_salary - lowest_salary, 2
+                ),
+
+                "highest_department_difference_from_overall_average": round(
+                    highest_salary - overall_average, 2
+                ),
+
+                "highest_department_salary_range": round(
+                    highest_department_max - highest_department_min, 2
+                )
+            }
+
+        department_analysis["salary"] = (
+            salary_analysis.to_dict()
+        )
+
+        department_analysis["salary_ranking"] = (
+            salary_ranking
+        )
+
+        department_analysis["salary_insights"] = (
+            salary_insights
+        )
+
+    # 6. Department-wise Attrition Analysis
+    if (
+        "Department" in dataset.columns
+        and "Attrition" in dataset.columns
+    ):
+
+        attrition_table = pd.crosstab(
+            dataset["Department"],
+            dataset["Attrition"]
+        )
+
+        department_analysis["attrition"] = (
+            attrition_table.to_dict()
+        )
+
+        department_analysis["attrition_percentage"] = {}
+
+        for department in attrition_table.index:
+
+            total = int(
+                attrition_table.loc[department].sum()
+            )
+
+            yes_count = int(
+                attrition_table.loc[department].get("Yes", 0)
+            )
+
+            department_analysis["attrition_percentage"][
+                str(department)
+            ] = round(
+                yes_count / total * 100, 2
+            ) if total else 0
+
+    # 7. Overall Attrition Analysis
+    attrition_analysis = {}
+
+    if "Attrition" in dataset.columns:
+
+        attrition_counts = dataset["Attrition"].value_counts()
+
+        total_records = len(dataset)
+
+        attrition_analysis = {
+            "counts": {
+                str(key): int(value)
+                for key, value in attrition_counts.items()
+            },
+
+            "total_records": total_records,
+
+            "percentage": {
+                str(key): round(
+                    value / total_records * 100, 2
+                )
+                for key, value in attrition_counts.items()
+            } if total_records else {}
+        }
+
+    # 8. Prepare Dataset Information
+    dataset_information = {
+        "overview": overview,
+        "missing_values": missing_values,
+        "numeric_analysis": numeric_summary,
+        "categorical_analysis": categorical_summary,
+        "department_analysis": department_analysis,
+        "attrition_analysis": attrition_analysis
+    }
+
+    # 9. Generate AI Report
     response = llm.invoke(
         f"""
-        You are a professional Business Data Analyst.
+        You are a professional Data Analyst.
+
+        Generate a factual and professional business
+        analysis report using only the supplied calculations.
 
         User Request:
-        {user_question or "Generate a complete business report."}
+        {user_question or "Generate a complete data analysis report."}
 
-        Analyze the following actual sales data and
-        generate a professional business report.
+        ACTUAL CALCULATED DATA:
+        {json.dumps(
+            dataset_information,
+            indent=2,
+            default=str
+        )}
 
-        Business Data:
-        {json.dumps(business_data, indent=2)}
-
-        Include these sections:
+        REPORT SECTIONS:
 
         1. Executive Summary
-        2. Overall Business Performance
-        3. Product Performance Analysis
-        4. Regional Sales Analysis
-        5. Monthly Sales Trend
-        6. Key Business Insights
-        7. Business Recommendations
+        2. Dataset Overview
+        3. Data Quality Analysis
+        4. Numerical Analysis
+        5. Categorical Analysis
+        6. Department-wise Salary Analysis
+        7. Employee Performance Insights
+        8. Department-wise Attrition Analysis
+        9. Key Business Insights
+        10. Actionable Recommendations
 
-        Instructions:
-        - Use simple professional English.
-        - Use the exact values from the supplied data.
-        - Mention currency as INR (Rs.).
-        - Do not invent data or statistics.
-        - Recommendations must be based on actual results.
-        - Format the report using Markdown.
+        STRICT DATA ACCURACY RULES:
+
+        1. Treat supplied Python calculations as the only
+           source of numerical truth.
+
+        2. Never invent, modify, estimate, or assume
+           numerical values.
+
+        3. Never assume salary currency.
+           Refer to the column as Monthly_Salary.
+           Never mention INR, USD, rupees, or dollars.
+
+        4. Use the supplied salary ranking to identify
+           the highest and lowest average salary departments.
+
+        5. Clearly distinguish these three calculations:
+           - Difference between department average salaries.
+           - Difference from overall average salary.
+           - Salary range within a department (maximum minus minimum).
+
+        6. Never confuse the department salary range
+           with the difference between department averages.
+
+        7. Never describe Attrition = Yes records as employees
+           who left the company, confirmed departures, or turnover.
+
+        8. When discussing this column, use the phrase
+           "Attrition = Yes records".
+
+        9. Refer to counts as records, not confirmed employees
+           who left.
+
+        10. Do not describe attrition as low, high, moderate,
+            healthy, or unhealthy without a verified benchmark.
+
+        11. Do not assume the scale or range of
+            Job_Satisfaction or Performance_Score.
+
+        12. Report their numerical statistics without calling
+            them good, poor, high, or low.
+
+        13. Do not assume that any category is expected,
+            correct, incorrect, or abnormal.
+
+        14. Do not claim Employee_ID or Employee_Name
+            values are unique unless uniqueness was
+            explicitly calculated and supplied.
+
+        15. In Data Quality Analysis, report only checks
+            actually supplied, such as missing values
+            and duplicate rows.
+
+        16. Do not claim that all data is valid,
+            internally consistent, or error-free.
+
+        17. Do not claim correlation or causation unless
+            the corresponding analysis is supplied.
+
+        18. Clearly distinguish actual observations
+            from recommendations.
+
+        19. Present recommendations as possible follow-up
+            actions, not proven solutions.
+
+        20. If information is unavailable, state that
+            it is not available in the dataset.
+
+        21. Avoid unsupported descriptive words such as
+            modest, significant, excellent, poor, healthy,
+            unhealthy, or concerning.
+
+        22. Use simple professional English and Markdown.
+
+        Your priority is factual accuracy.
+        Never make the report sound impressive by adding
+        unsupported claims.
         """
     )
 
-    # Extract AI response
     content = response.content
 
     if isinstance(content, str):
-
         report = content
 
     else:
-
         report = "\n".join(
             block.get("text", "")
             for block in content
@@ -148,34 +358,18 @@ def run_report_agent(user_question=None):
             and block.get("type") == "text"
         )
 
-    # Save report
-    os.makedirs("outputs/reports", exist_ok=True)
+    print("\nData Analysis Report Generated Successfully!")
 
-    report_path = "outputs/reports/business_report.md"
-
-    with open(report_path, "w", encoding="utf-8") as file:
-        file.write(report)
-
-    # Display summary
-    print("\nBusiness Report Generated Successfully!")
-
-    print("\nBusiness Summary:")
-    print("Total Revenue:", f"Rs. {total_revenue:,}")
-    print("Total Profit:", f"Rs. {total_profit:,}")
-    print("Total Orders:", total_orders)
-    print("Profit Margin:", f"{profit_margin}%")
-    print("Best Product:", best_product)
-    print("Best Region:", best_region)
-
-    print("\nReport Saved At:", report_path)
-
-    return (
-        f"Business report generated successfully. "
-        f"Report Path: {report_path}"
-    )
+    return report
 
 
-# 3. Run independently
 if __name__ == "__main__":
 
-    run_report_agent()
+    df = pd.read_csv("data/raw/sales_data.csv")
+
+    report = run_report_agent(
+        "Generate a complete data analysis report.",
+        df
+    )
+
+    print(report)
