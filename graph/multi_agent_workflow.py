@@ -94,14 +94,18 @@ llm = ChatGroq(
     temperature=0
 )
 
+
+# Use JSON mode to avoid forced tool-call errors
 agent_planner_llm = llm.with_structured_output(
-    AgentSelection
+    AgentSelection,
+    method="json_mode"
 )
 
 planner_llm = llm.with_structured_output(
     ToolSelection,
     method="json_mode"
 )
+
 
 
 # 10. Multi-Agent Planner Node
@@ -113,13 +117,19 @@ def agent_planner_node(state: AgentState):
         f"""
         You are an expert AI Data Analyst Agent Planner.
 
+        IMPORTANT:
+        Return your response in valid JSON format.
+        The output must be a JSON object.
+        Use the exact JSON field name "selected_agents".
+
         Select the required agents for the user's request.
 
         AVAILABLE AGENTS:
 
         1. eda:
-           Dataset overview, missing values, numerical
-           statistics, categorical analysis and correlation.
+           Dataset overview, missing values, missing percentages,
+           duplicate rows, duplicate Employee_ID detection,
+           numerical statistics, categorical analysis and correlation.
 
         2. sql:
            SQL queries, filtering, grouping, sorting
@@ -139,9 +149,12 @@ def agent_planner_node(state: AgentState):
         - If the user requests a chart, include visualization.
         - If the user requests a business report, include report.
         - For department-wise calculations, include SQL when appropriate.
-        - For dataset statistics or correlation, include EDA.
+        - For dataset statistics, duplicates or correlation, include EDA.
         - Avoid unnecessary agents.
         - Return each agent only once.
+
+        Example JSON response:
+        {{"selected_agents": ["eda"]}}
 
         USER QUESTION:
         {question}
@@ -172,10 +185,13 @@ def agent_planner_node(state: AgentState):
     }
 
 
+
 # 11. Dynamic EDA Agent
 def eda_node(state: AgentTask):
 
     question = state["user_question"]
+    question_lower = question.lower()
+
     df = state["dataframe"]
 
     dynamic_tools = create_dynamic_eda_tools(df)
@@ -203,6 +219,24 @@ def eda_node(state: AgentTask):
         Select only the tools required to answer
         the user's question.
 
+        IMPORTANT TOOL SELECTION RULES:
+
+        - For missing value questions, select get_missing_values.
+        - For missing percentage questions, select get_missing_value_percentage.
+        - For exact duplicate row questions, select get_duplicate_rows.
+        - For duplicate Employee_ID questions, select get_duplicate_employee_ids.
+        - For numeric statistics, select get_numeric_summary.
+        - For categorical analysis, select get_categorical_summary.
+        - For correlation questions, select get_correlation.
+        - For dataset overview questions, select get_dataset_overview.
+        - For frequent values in a specific column, select get_top_values.
+
+        If the user asks to check both duplicate IDs and
+        completely identical rows, select BOTH:
+
+        get_duplicate_employee_ids
+        get_duplicate_rows
+
         Return a valid JSON object with a field named "tools".
 
         The tools field must contain a list of exact tool names.
@@ -213,7 +247,39 @@ def eda_node(state: AgentTask):
         """
     )
 
-    selected_tools = response.tools
+    selected_tools = list(response.tools)
+
+    # Deterministic duplicate tool selection
+    # Ensures both duplicate checks run for duplicate-related questions
+    duplicate_keywords = [
+        "duplicate",
+        "duplicates",
+        "duplicated",
+        "repeated",
+        "repeat"
+    ]
+
+    is_duplicate_question = any(
+        keyword in question_lower
+        for keyword in duplicate_keywords
+    )
+
+    if is_duplicate_question:
+
+        if "get_duplicate_employee_ids" in tool_map:
+            selected_tools.append(
+                "get_duplicate_employee_ids"
+            )
+
+        if "get_duplicate_rows" in tool_map:
+            selected_tools.append(
+                "get_duplicate_rows"
+            )
+
+    # Remove duplicate tool names while preserving order
+    selected_tools = list(dict.fromkeys(selected_tools))
+
+    print("\nSelected EDA Tools:", selected_tools)
 
     results = []
 
@@ -230,7 +296,7 @@ def eda_node(state: AgentTask):
                 (
                     column
                     for column in df.columns
-                    if column.lower() in question.lower()
+                    if column.lower() in question_lower
                 ),
                 None
             )
@@ -248,6 +314,10 @@ def eda_node(state: AgentTask):
 
         results.append(
             f"{tool_name}: {result}"
+        )
+
+        print(
+            f"\n[EDA TOOL EXECUTED] {tool_name}"
         )
 
     return {
@@ -299,23 +369,19 @@ def report_node(state: AgentState):
 
     print("\nGenerating Business Report...")
 
-    # Collect completed agent results
     agent_results = state.get("agent_results", {})
 
-    # Get SQL Agent results
     sql_results = agent_results.get(
         "sql",
         "SQL Agent results are not available."
     )
 
-    # Generate report using dataset and SQL results
     result = run_report_agent(
         state["user_question"],
         state["dataframe"],
         sql_results
     )
 
-    # Create report output directory
     report_directory = os.path.join(
         PROJECT_ROOT,
         "outputs",
@@ -327,7 +393,6 @@ def report_node(state: AgentState):
         exist_ok=True
     )
 
-    # Save business report
     report_path = os.path.join(
         report_directory,
         "business_report.md"
@@ -428,17 +493,13 @@ def dispatch_agents(state: AgentState):
         "\n========== PARALLEL EXECUTION STARTED =========="
     )
 
-    # Exclude Report Agent from parallel execution
     parallel_agents = [
         agent
         for agent in selected_agents
         if agent != "report"
     ]
 
-    # If only Report Agent is selected,
-    # execute it through the executor
     if not parallel_agents and "report" in selected_agents:
-
         parallel_agents = ["report"]
 
     return [
@@ -466,8 +527,6 @@ def dispatch_report(state: AgentState):
         {}
     )
 
-    # Execute Report Agent only after
-    # parallel agents have completed
     if (
         "report" in selected_agents
         and "report" not in completed_results
@@ -527,8 +586,14 @@ def final_response_node(state: AgentState):
         16. Use successful agents' results even if
             another agent failed.
         17. Use SQL Agent results when available.
-        18. Do not contradict the actual calculations
+        18. Do not contradict actual calculations
             returned by SQL Agent or EDA Agent.
+        19. Clearly report duplicate Employee_ID values
+            and their occurrence counts when available.
+        20. Clearly report exact duplicate row counts
+            when available.
+        21. Do not claim duplicate rows were checked
+            unless get_duplicate_rows returned a result.
 
         RESPONSE FORMAT:
 
@@ -584,14 +649,12 @@ workflow.add_edge(
     "planner"
 )
 
-# Planner -> Parallel Agents
 workflow.add_conditional_edges(
     "planner",
     dispatch_agents,
     ["agent_executor"]
 )
 
-# Parallel Agents -> Report Agent or Final Response
 workflow.add_conditional_edges(
     "agent_executor",
     dispatch_report,
@@ -601,13 +664,11 @@ workflow.add_conditional_edges(
     ]
 )
 
-# Report Agent -> Final Response
 workflow.add_edge(
     "report_executor",
     "final_response"
 )
 
-# Final Response -> END
 workflow.add_edge(
     "final_response",
     END
