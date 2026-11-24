@@ -1,41 +1,47 @@
 
 import os
 import sys
-from typing import TypedDict, Optional, Any, Literal
+import operator
+
+from typing import TypedDict, Optional, Any, Literal, Annotated
 
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
-# 1. Project path
+from langchain_groq import ChatGroq
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+
+
+# 1. Project Path
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
 
 sys.path.insert(0, PROJECT_ROOT)
 
-# 2. Load environment variables
+
+# 2. Load Environment Variables
 load_dotenv(
     dotenv_path=os.path.join(PROJECT_ROOT, ".env")
 )
 
-# 3. Check Groq API key
+
+# 3. Check Groq API Key
 if not os.getenv("GROQ_API_KEY"):
     raise ValueError(
         "GROQ_API_KEY not found. Please check your .env file."
     )
 
-# 4. Import required libraries
-from pydantic import BaseModel
-from langchain_groq import ChatGroq
-from langgraph.graph import StateGraph, START, END
 
-# 5. Import dynamic agents
+# 4. Import Agents
 from tools.dynamic_eda_tool import create_dynamic_eda_tools
 from database.sql_agent import run_sql_agent
 from visualization.chart_agent import run_visualization_agent
 from reports.business_report_agent import run_report_agent
 
 
-# 6. Define workflow state
+# 5. Multi-Agent Workflow State
 class AgentState(TypedDict):
 
     user_question: str
@@ -43,23 +49,40 @@ class AgentState(TypedDict):
     db_path: str
     columns: list
 
-    selected_agent: Optional[str]
-    agent_result: Optional[str]
+    selected_agents: list[str]
+
+    agent_results: Annotated[
+        dict[str, str],
+        operator.or_
+    ]
+
     final_response: Optional[str]
 
 
-# 7. Router response structure
-class RouterResponse(BaseModel):
+# 6. Individual Agent Task State
+class AgentTask(TypedDict):
 
-    selected_agent: Literal[
-        "eda",
-        "sql",
-        "visualization",
-        "report"
+    user_question: str
+    dataframe: Any
+    db_path: str
+    columns: list
+    agent_name: str
+
+
+# 7. Planner Response Structure
+class AgentSelection(BaseModel):
+
+    selected_agents: list[
+        Literal[
+            "eda",
+            "sql",
+            "visualization",
+            "report"
+        ]
     ]
 
 
-# 8. EDA tool selection structure
+# 8. EDA Tool Selection Structure
 class ToolSelection(BaseModel):
 
     tools: list[str]
@@ -71,8 +94,8 @@ llm = ChatGroq(
     temperature=0
 )
 
-router_llm = llm.with_structured_output(
-    RouterResponse
+agent_planner_llm = llm.with_structured_output(
+    AgentSelection
 )
 
 planner_llm = llm.with_structured_output(
@@ -81,47 +104,76 @@ planner_llm = llm.with_structured_output(
 )
 
 
-# 10. Agent Router
-def agent_router(state):
+# 10. Multi-Agent Planner Node
+def agent_planner_node(state: AgentState):
 
     question = state["user_question"]
 
-    response = router_llm.invoke(
+    response = agent_planner_llm.invoke(
         f"""
-        You are an AI Data Analyst Agent Router.
+        You are an expert AI Data Analyst Agent Planner.
 
-        Select exactly one agent for the user's question.
+        Select the required agents for the user's request.
 
-        Available Agents:
+        AVAILABLE AGENTS:
 
         1. eda:
-           Dataset overview, missing values,
-           statistics, correlation and categorical analysis.
+           Dataset overview, missing values, numerical
+           statistics, categorical analysis and correlation.
 
         2. sql:
-           Database queries, filtering, grouping,
-           sorting and calculations.
+           SQL queries, filtering, grouping, sorting
+           and calculations.
 
         3. visualization:
-           Generate bar, line or pie charts.
+           Bar charts, line charts, pie charts,
+           scatter plots and trend lines.
 
         4. report:
-           Generate complete data analysis reports.
+           Business reports, key findings and recommendations.
 
-        User Question:
+        SELECTION RULES:
+
+        - Select only the agents required.
+        - For complete dataset analysis, select all four agents.
+        - If the user requests a chart, include visualization.
+        - If the user requests a business report, include report.
+        - For department-wise calculations, include SQL when appropriate.
+        - For dataset statistics or correlation, include EDA.
+        - Avoid unnecessary agents.
+        - Return each agent only once.
+
+        USER QUESTION:
         {question}
-
-        Return the correct agent.
         """
     )
 
+    valid_agents = [
+        "eda",
+        "sql",
+        "visualization",
+        "report"
+    ]
+
+    selected_agents = [
+        agent
+        for agent in valid_agents
+        if agent in response.selected_agents
+    ]
+
+    if not selected_agents:
+        selected_agents = ["eda"]
+
+    print("\nSelected Agents:", selected_agents)
+
     return {
-        "selected_agent": response.selected_agent
+        "selected_agents": selected_agents,
+        "agent_results": {}
     }
 
 
 # 11. Dynamic EDA Agent
-def eda_node(state):
+def eda_node(state: AgentTask):
 
     question = state["user_question"]
     df = state["dataframe"]
@@ -138,7 +190,6 @@ def eda_node(state):
         for selected_tool in dynamic_tools
     )
 
-    # Select EDA tools using JSON output
     response = planner_llm.invoke(
         f"""
         You are an expert Data Analysis Planner.
@@ -157,14 +208,13 @@ def eda_node(state):
         The tools field must contain a list of exact tool names.
         Do not select unavailable tools.
 
-        Example JSON:
+        Example:
         {{"tools": ["get_dataset_overview", "get_missing_values"]}}
         """
     )
 
     selected_tools = response.tools
 
-    # Execute selected tools
     results = []
 
     for tool_name in selected_tools:
@@ -201,14 +251,16 @@ def eda_node(state):
         )
 
     return {
-        "agent_result": "\n".join(results)
-        if results
-        else "No suitable EDA tools were selected."
+        "agent_results": {
+            "eda": "\n".join(results)
+            if results
+            else "No suitable EDA tools were selected."
+        }
     }
 
 
 # 12. Dynamic SQL Agent
-def sql_node(state):
+def sql_node(state: AgentTask):
 
     columns, results = run_sql_agent(
         state["user_question"],
@@ -217,15 +269,17 @@ def sql_node(state):
     )
 
     return {
-        "agent_result": (
-            f"Columns: {columns}\n"
-            f"Results: {results}"
-        )
+        "agent_results": {
+            "sql": (
+                f"Columns: {columns}\n"
+                f"Results: {results}"
+            )
+        }
     }
 
 
 # 13. Dynamic Visualization Agent
-def visualization_node(state):
+def visualization_node(state: AgentTask):
 
     result = run_visualization_agent(
         state["user_question"],
@@ -234,146 +288,338 @@ def visualization_node(state):
     )
 
     return {
-        "agent_result": result
+        "agent_results": {
+            "visualization": str(result)
+        }
     }
 
 
 # 14. Dynamic Report Agent
-def report_node(state):
+def report_node(state: AgentState):
 
+    print("\nGenerating Business Report...")
+
+    # Collect completed agent results
+    agent_results = state.get("agent_results", {})
+
+    # Get SQL Agent results
+    sql_results = agent_results.get(
+        "sql",
+        "SQL Agent results are not available."
+    )
+
+    # Generate report using dataset and SQL results
     result = run_report_agent(
         state["user_question"],
-        state["dataframe"]
+        state["dataframe"],
+        sql_results
+    )
+
+    # Create report output directory
+    report_directory = os.path.join(
+        PROJECT_ROOT,
+        "outputs",
+        "reports"
     )
 
     os.makedirs(
-        "outputs/reports",
+        report_directory,
         exist_ok=True
     )
 
+    # Save business report
+    report_path = os.path.join(
+        report_directory,
+        "business_report.md"
+    )
+
     with open(
-        "outputs/reports/business_report.md",
+        report_path,
         "w",
         encoding="utf-8"
     ) as file:
 
-        file.write(result)
+        file.write(str(result))
+
+    print(
+        "\nBusiness Report Saved:",
+        report_path
+    )
 
     return {
-        "agent_result": result
+        "agent_results": {
+            "report": str(result)
+        }
     }
 
 
+# 15. Parallel Agent Executor with Retry
+def agent_executor_node(task: AgentTask):
 
-# 15. Final Response
-def final_response_node(state):
+    agent_name = task["agent_name"]
+
+    agent_functions = {
+        "eda": eda_node,
+        "sql": sql_node,
+        "visualization": visualization_node,
+        "report": report_node
+    }
+
+    max_attempts = 2
+
+    print(
+        f"\n[{agent_name.upper()}] Agent Started..."
+    )
+
+    for attempt in range(1, max_attempts + 1):
+
+        try:
+
+            print(
+                f"[{agent_name.upper()}] Attempt {attempt}/{max_attempts}"
+            )
+
+            agent_function = agent_functions[agent_name]
+
+            result = agent_function(task)
+
+            print(
+                f"[{agent_name.upper()}] Agent Completed Successfully!"
+            )
+
+            return result
+
+        except Exception as error:
+
+            print(
+                f"\n[{agent_name.upper()}] Attempt {attempt} Failed: {error}"
+            )
+
+            if attempt < max_attempts:
+
+                print(
+                    f"[{agent_name.upper()}] Retrying Agent..."
+                )
+
+            else:
+
+                error_message = (
+                    f"{agent_name.upper()} Agent Failed "
+                    f"after {max_attempts} attempts: {str(error)}"
+                )
+
+                print(
+                    f"\n[ERROR] {error_message}"
+                )
+
+                return {
+                    "agent_results": {
+                        agent_name: error_message
+                    }
+                }
+
+
+# 16. Parallel Agent Dispatcher
+def dispatch_agents(state: AgentState):
+
+    selected_agents = state["selected_agents"]
+
+    print(
+        "\n========== PARALLEL EXECUTION STARTED =========="
+    )
+
+    # Exclude Report Agent from parallel execution
+    parallel_agents = [
+        agent
+        for agent in selected_agents
+        if agent != "report"
+    ]
+
+    # If only Report Agent is selected,
+    # execute it through the executor
+    if not parallel_agents and "report" in selected_agents:
+
+        parallel_agents = ["report"]
+
+    return [
+        Send(
+            "agent_executor",
+            {
+                "user_question": state["user_question"],
+                "dataframe": state["dataframe"],
+                "db_path": state["db_path"],
+                "columns": state["columns"],
+                "agent_name": agent_name
+            }
+        )
+        for agent_name in parallel_agents
+    ]
+
+
+# 16.1 Report Agent Routing
+def dispatch_report(state: AgentState):
+
+    selected_agents = state["selected_agents"]
+
+    completed_results = state.get(
+        "agent_results",
+        {}
+    )
+
+    # Execute Report Agent only after
+    # parallel agents have completed
+    if (
+        "report" in selected_agents
+        and "report" not in completed_results
+    ):
+
+        print(
+            "\n========== REPORT AGENT EXECUTION STARTED =========="
+        )
+
+        return "report_executor"
+
+    return "final_response"
+
+
+# 17. Final Response Node
+def final_response_node(state: AgentState):
 
     response = llm.invoke(
         f"""
         You are a professional AI Data Analyst.
 
-        User Question:
+        USER QUESTION:
         {state["user_question"]}
 
-        Selected Agent:
-        {state["selected_agent"]}
+        SELECTED AGENTS:
+        {state["selected_agents"]}
 
-        Actual Analysis Results:
-        {state["agent_result"]}
+        ACTUAL RESULTS FROM EACH AGENT:
+        {state["agent_results"]}
+
+        Combine the results from all executed agents
+        into one clear response.
 
         STRICT DATA ACCURACY RULES:
 
-        1. Use only information supported by actual analysis results.
-
-        2. Never invent, assume, or modify numerical values.
-
+        1. Use only information supported by actual results.
+        2. Never invent or modify numerical values.
         3. Never assume currency.
-           If the dataset does not specify currency,
-           use the column name Monthly_Salary without
-           mentioning USD, INR, dollars, or rupees.
-
-        4. Never assume the meaning of a categorical value.
-           For example, Attrition = Yes must be described
-           as "Attrition = Yes records".
-           Never automatically interpret it as employees
-           who left the company.
-
-        5. Never describe attrition as low, high, moderate,
-           or healthy without a verified external benchmark.
-
-        6. Do not invent industry standards or benchmarks.
-
-        7. Do not claim causation or correlation
-           unless the analysis explicitly supports it.
-
-        8. Do not claim that job satisfaction affects
-           attrition or that performance causes attrition.
-
-        9. Clearly distinguish actual observations
-           from recommendations.
-
-        10. If information is unavailable,
-            explicitly mention that it is unavailable.
-
-        11. Do not create conclusions from assumptions.
-
-        12. Keep the response clear and professional.
+        4. Use Monthly_Salary without assuming a currency.
+        5. Attrition = Yes must be described as
+           "Attrition = Yes records".
+        6. Never automatically interpret Attrition = Yes
+           as employees who left the company.
+        7. Do not invent industry benchmarks.
+        8. Do not claim causation or correlation unless
+           analysis explicitly supports it.
+        9. Distinguish observations from recommendations.
+        10. If information is unavailable, mention it.
+        11. Do not claim an agent completed a task
+            unless its result is present.
+        12. If visualization results contain a chart path,
+            mention that the chart was generated.
+        13. Never invent chart results or file paths.
+        14. If an agent result contains "Agent Failed",
+            clearly mention that agent's failure.
+        15. Do not invent or estimate missing agent results.
+        16. Use successful agents' results even if
+            another agent failed.
+        17. Use SQL Agent results when available.
+        18. Do not contradict the actual calculations
+            returned by SQL Agent or EDA Agent.
 
         RESPONSE FORMAT:
 
         - Use simple professional English.
         - Use Markdown headings and bullet points.
         - Present numerical findings accurately.
+        - Combine relevant results from different agents.
         - Explain important observations.
-        - Give practical recommendations only
-          when supported by the available data.
+        - Give practical recommendations only when supported.
+        - Mention agent failures when present.
+        - Avoid unnecessary repetition.
 
-        Your priority is factual accuracy, not making
-        the report sound impressive.
+        Your priority is factual accuracy.
         """
+    )
+
+    print(
+        "\n========== FINAL RESPONSE GENERATED =========="
     )
 
     return {
         "final_response": response.content
     }
 
-# 16. Build LangGraph Workflow
+
+# 18. Build Multi-Agent LangGraph
 workflow = StateGraph(AgentState)
 
-workflow.add_node("router", agent_router)
-workflow.add_node("eda", eda_node)
-workflow.add_node("sql", sql_node)
-workflow.add_node("visualization", visualization_node)
-workflow.add_node("report", report_node)
-workflow.add_node("final_response", final_response_node)
-
-
-# 17. Workflow connections
-workflow.add_edge(START, "router")
-
-workflow.add_conditional_edges(
-    "router",
-    lambda state: state["selected_agent"],
-    {
-        "eda": "eda",
-        "sql": "sql",
-        "visualization": "visualization",
-        "report": "report"
-    }
+workflow.add_node(
+    "planner",
+    agent_planner_node
 )
 
-workflow.add_edge("eda", "final_response")
-workflow.add_edge("sql", "final_response")
-workflow.add_edge("visualization", "final_response")
-workflow.add_edge("report", "final_response")
+workflow.add_node(
+    "agent_executor",
+    agent_executor_node
+)
 
-workflow.add_edge("final_response", END)
+workflow.add_node(
+    "report_executor",
+    report_node
+)
+
+workflow.add_node(
+    "final_response",
+    final_response_node
+)
 
 
-# 18. Compile workflow
+# 19. Workflow Connections
+workflow.add_edge(
+    START,
+    "planner"
+)
+
+# Planner -> Parallel Agents
+workflow.add_conditional_edges(
+    "planner",
+    dispatch_agents,
+    ["agent_executor"]
+)
+
+# Parallel Agents -> Report Agent or Final Response
+workflow.add_conditional_edges(
+    "agent_executor",
+    dispatch_report,
+    [
+        "report_executor",
+        "final_response"
+    ]
+)
+
+# Report Agent -> Final Response
+workflow.add_edge(
+    "report_executor",
+    "final_response"
+)
+
+# Final Response -> END
+workflow.add_edge(
+    "final_response",
+    END
+)
+
+
+# 20. Compile Workflow
 app = workflow.compile()
 
 
 if __name__ == "__main__":
 
-    print("Dynamic AI Data Analyst Workflow is ready!")
+    print(
+        "Parallel Multi-Agent AI Data Analyst Workflow is ready!"
+    )

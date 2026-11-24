@@ -10,7 +10,11 @@ llm = ChatGroq(
 )
 
 
-def run_report_agent(user_question, df):
+def run_report_agent(
+    user_question,
+    df,
+    sql_results=None
+):
 
     print("\nGenerating Data Analysis Report...")
 
@@ -91,9 +95,7 @@ def run_report_agent(user_question, df):
 
         salary_ranking = {
             str(key): float(value)
-            for key, value in (
-                salary_analysis["mean"].items()
-            )
+            for key, value in salary_analysis["mean"].items()
         }
 
         overall_average = round(
@@ -155,17 +157,9 @@ def run_report_agent(user_question, df):
                 )
             }
 
-        department_analysis["salary"] = (
-            salary_analysis.to_dict()
-        )
-
-        department_analysis["salary_ranking"] = (
-            salary_ranking
-        )
-
-        department_analysis["salary_insights"] = (
-            salary_insights
-        )
+        department_analysis["salary"] = salary_analysis.to_dict()
+        department_analysis["salary_ranking"] = salary_ranking
+        department_analysis["salary_insights"] = salary_insights
 
     # 6. Department-wise Attrition Analysis
     if (
@@ -232,7 +226,14 @@ def run_report_agent(user_question, df):
         "numeric_analysis": numeric_summary,
         "categorical_analysis": categorical_summary,
         "department_analysis": department_analysis,
-        "attrition_analysis": attrition_analysis
+        "attrition_analysis": attrition_analysis,
+
+        # SQL Agent calculated results
+        "sql_analysis_results": (
+            sql_results
+            if sql_results is not None
+            else "SQL Agent results are not available."
+        )
     }
 
     # 9. Generate AI Report
@@ -260,7 +261,7 @@ def run_report_agent(user_question, df):
         3. Data Quality Analysis
         4. Numerical Analysis
         5. Categorical Analysis
-        6. Department-wise Salary Analysis
+        6. Department-wise Salary and Experience Analysis
         7. Employee Performance Insights
         8. Department-wise Attrition Analysis
         9. Key Business Insights
@@ -331,13 +332,39 @@ def run_report_agent(user_question, df):
             actions, not proven solutions.
 
         20. If information is unavailable, state that
-            it is not available in the dataset.
+            it is not available in the dataset or supplied analysis.
 
         21. Avoid unsupported descriptive words such as
             modest, significant, excellent, poor, healthy,
             unhealthy, or concerning.
 
         22. Use simple professional English and Markdown.
+
+        23. SQL Agent results are additional calculated data
+            and must be considered when available.
+
+        24. Use SQL Agent results for requested calculations,
+            including department-wise average experience.
+
+        25. Never claim a calculation is unavailable
+            if it is present in SQL Agent results.
+
+        26. If Python calculations and SQL results appear
+            inconsistent, identify the inconsistency clearly.
+            Do not silently choose one result.
+
+        27. Include relevant SQL Agent findings in the
+            Department-wise Salary and Experience Analysis
+            section.
+
+        28. Identify all tied departments when the supplied
+            results show a tie for the highest or lowest value.
+
+        29. Do not treat SQL Agent results as verified if
+            they contain an error message or failed execution.
+
+        30. Do not invent experience statistics if SQL results
+            do not provide them.
 
         Your priority is factual accuracy.
         Never make the report sound impressive by adding

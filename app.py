@@ -23,7 +23,7 @@ st.title("📊 AI Data Analyst Agent")
 
 st.write(
     "Upload your CSV or Excel dataset and analyze it "
-    "using AI-powered agents."
+    "using AI-powered multi-agents."
 )
 
 
@@ -111,7 +111,7 @@ if dataset_info is not None:
 
     st.dataframe(
         dataset_info["dataframe"].head(10),
-        use_container_width=True
+        width="stretch"
     )
 
     with st.expander("View Dataset Columns"):
@@ -126,11 +126,11 @@ st.subheader("🤖 Ask Your Data Analyst Agent")
 
 user_question = st.text_input(
     "Enter your question:",
-    placeholder="Example: Show dataset overview or generate a chart."
+    placeholder="Example: Analyze the dataset and generate a business report."
 )
 
 
-# 7. Run Agent Workflow
+# 7. Run Multi-Agent Workflow
 if st.button("Analyze Dataset", type="primary"):
 
     if dataset_info is None:
@@ -148,37 +148,62 @@ if st.button("Analyze Dataset", type="primary"):
             "dataframe": dataset_info["dataframe"],
             "db_path": dataset_info["db_path"],
             "columns": dataset_info["columns"],
-            "selected_agent": None,
-            "agent_result": None,
+            "selected_agents": [],
+            "agent_results": {},
             "final_response": None
         }
 
         try:
 
             with st.spinner(
-                "AI Agent is analyzing your dataset..."
+                "AI Multi-Agent System is analyzing your dataset..."
             ):
 
                 result = agent_workflow.invoke(
                     initial_state
                 )
 
-            st.success("Analysis Completed!")
+             
 
+            st.success("Multi-Agent Analysis Completed!")
+
+            # Final AI response
             st.subheader("🤖 AI Agent Response")
 
             st.markdown(
                 result["final_response"]
             )
 
-            selected_agent = result["selected_agent"]
+            # Display selected agents
+            selected_agents = result["selected_agents"]
 
-            st.subheader("Selected Agent")
+            st.divider()
 
-            st.write(selected_agent.upper())
+            st.subheader("🤖 Executed Agents")
+
+            for agent_name in selected_agents:
+
+                st.success(
+                    f"✓ {agent_name.upper()} Agent Executed"
+                )
+
+            # Display individual agent results
+            with st.expander("View Individual Agent Results"):
+
+                for agent_name, agent_result in result["agent_results"].items():
+
+                    st.markdown(
+                        f"### {agent_name.upper()} Agent"
+                    )
+
+                    st.markdown(
+                        str(agent_result)
+                    )
+
+                    st.divider()
 
             # Display session-specific chart
-            if selected_agent == "visualization":
+            if "visualization" in selected_agents:
 
                 session_folder = os.path.dirname(
                     os.path.abspath(dataset_info["db_path"])
@@ -196,21 +221,34 @@ if st.button("Analyze Dataset", type="primary"):
 
                     st.image(
                         chart_path,
-                        use_container_width=True
+                        width="stretch"
                     )
 
                 else:
 
-                    st.warning("Chart file not found.")
+                    st.warning(
+                        "Visualization agent executed, "
+                        "but chart file was not found."
+                    )
 
-            # Display report
-            if selected_agent == "report":
+            # Display business report
+            if "report" in selected_agents:
 
                 st.subheader("📑 Data Analysis Report")
 
-                st.markdown(
-                    result["agent_result"]
+                report_result = result["agent_results"].get(
+                    "report"
                 )
+
+                if report_result:
+
+                    st.markdown(
+                        report_result
+                    )
+
+                else:
+
+                    st.warning("Report result is unavailable.")
 
         except Exception as e:
 
